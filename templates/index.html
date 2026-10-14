@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>POS Nevera</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    .scanner-box { border: 3px solid #22c55e; border-radius: 12px; overflow: hidden; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen">
+  <div class="max-w-md mx-auto bg-white min-h-screen shadow-lg">
+    <!-- Header -->
+    <header class="bg-green-600 text-white p-4 flex justify-between items-center">
+      <h1 class="text-xl font-bold">POS Nevera</h1>
+      <div class="flex gap-2">
+        <button onclick="showView('venta')" class="px-3 py-1 bg-white text-green-700 rounded text-sm font-medium">Vender</button>
+        <button onclick="showView('productos')" class="px-3 py-1 bg-green-700 rounded text-sm">Productos</button>
+        <button onclick="showView('ventas')" class="px-3 py-1 bg-green-700 rounded text-sm">Historial</button>
+      </div>
+    </header>
+
+    <!-- Vista Venta -->
+    <div id="view-venta" class="p-4">
+      <div id="reader" class="scanner-box mb-4" style="width:100%;"></div>
+      <div id="ticket" class="border rounded-lg p-3 mb-4 bg-gray-50 min-h-[120px]">
+        <p class="text-gray-400 text-center text-sm" id="empty-msg">Escanea productos para empezar</p>
+        <div id="ticket-items"></div>
+        <div id="ticket-total" class="mt-2 pt-2 border-t font-bold text-lg text-right hidden"></div>
+      </div>
+      <button onclick="confirmarVenta()" id="btn-cobrar" class="w-full bg-green-600 text-white py-4 rounded-xl text-lg font-bold disabled:opacity-50" disabled>
+        Cobrar €0.00
+      </button>
+    </div>
+
+    <!-- Vista Productos -->
+    <div id="view-productos" class="p-4 hidden">
+      <h2 class="text-lg font-bold mb-3">Productos</h2>
+      <form id="form-producto" class="space-y-2 mb-4 bg-gray-50 p-3 rounded-lg">
+        <input type="text" id="p-name" placeholder="Nombre" class="w-full border p-2 rounded" required>
+        <input type="text" id="p-barcode" placeholder="Código de barras" class="w-full border p-2 rounded" required>
+        <input type="number" step="0.01" id="p-price" placeholder="Precio (€)" class="w-full border p-2 rounded" required>
+        <input type="number" id="p-stock" placeholder="Stock inicial" class="w-full border p-2 rounded" value="0">
+        <button type="submit" class="w-full bg-blue-600 text-white py-2 rounded font-medium">Añadir producto</button>
+      </form>
+      <div id="lista-productos" class="space-y-2"></div>
+    </div>
+
+    <!-- Vista Ventas -->
+    <div id="view-ventas" class="p-4 hidden">
+      <h2 class="text-lg font-bold mb-3">Últimas ventas</h2>
+      <div id="lista-ventas" class="space-y-3"></div>
+    </div>
+  </div>
+
+  <script>
+    let ticket = [];
+    let html5QrCode = null;
+
+    function showView(view) {
+      document.getElementById('view-venta').classList.toggle('hidden', view !== 'venta');
+      document.getElementById('view-productos').classList.toggle('hidden', view !== 'productos');
+      document.getElementById('view-ventas').classList.toggle('hidden', view !== 'ventas');
+      if (view === 'productos') cargarProductos();
+      if (view === 'ventas') cargarVentas();
+      if (view === 'venta' && !html5QrCode) iniciarScanner();
+    }
+
+    async function iniciarScanner() {
+      html5QrCode = new Html5Qrcode("reader");
+      const config = { fps: 10, qrbox: { width: 250, height: 150 } };
+      try {
+        await html5QrCode.start(
+          { facingMode: "environment" },
+          config,
+          onScanSuccess,
+          () => {}
+        );
+      } catch (err) {
+        console.error(err);
+        document.getElementById('reader').innerHTML = '<p class="text-red-500 p-4 text-center">No se pudo acceder a la cámara. Permite el acceso o usa HTTPS.</p>';
+      }
+    }
+
+    async function onScanSuccess(decodedText) {
+      try {
+        const res = await fetch(`/api/products/barcode/${encodeURIComponent(decodedText)}`);
+        if (!res.ok) {
+          alert('Producto no encontrado: ' + decodedText);
+          return;
+        }
+        const product = await res.json();
+        añadirAlTicket(product);
+      } catch (e) {
+        alert('Error al buscar producto');
+      }
+    }
+
+    function añadirAlTicket(product) {
+      const existing = ticket.find(i => i.product_id === product.id);
+      if (existing) {
+        existing.quantity += 1;
+      } else {
+        ticket.push({
+          product_id: product.id,
+          name: product.name,
+          price: product.price,
+          quantity: 1,
+          stock: product.stock
+        });
+      }
+      renderTicket();
+    }
+
+    function renderTicket() {
+      const container = document.getElementById('ticket-items');
+      const totalEl = document.getElementById('ticket-total');
+      const empty = document.getElementById('empty-msg');
+      const btn = document.getElementById('btn-cobrar');
+      if (ticket.length === 0) {
+        container.innerHTML = '';
+        empty.classList.remove('hidden');
+        totalEl.classList.add('hidden');
+        btn.disabled = true;
+        btn.textContent = 'Cobrar €0.00';
+        return;
+      }
+      empty.classList.add('hidden');
+      let total = 0;
+      container.innerHTML = ticket.map((item, idx) => {
+        total += item.price * item.quantity;
+        return `
+          <div class="flex justify-between items-center py-1 border-b">
+            <div>
+              <div class="font-medium">${item.name}</div>
+              <div class="text-xs text-gray-500">€${item.price.toFixed(2)} × ${item.quantity}</div>
+            </div>
+            <div class="flex items-center gap-2">
+              <button onclick="cambiarCantidad(${idx}, -1)" class="w-7 h-7 bg-gray-200 rounded">-</button>
+              <span class="w-6 text-center">${item.quantity}</span>
+              <button onclick="cambiarCantidad(${idx}, 1)" class="w-7 h-7 bg-gray-200 rounded">+</button>
+            </div>
+          </div>`;
+      }).join('');
+      totalEl.classList.remove('hidden');
+      totalEl.textContent = `Total: €${total.toFixed(2)}`;
+      btn.disabled = false;
+      btn.textContent = `Cobrar €${total.toFixed(2)}`;
+    }
+
+    function cambiarCantidad(idx, delta) {
+      ticket[idx].quantity += delta;
+      if (ticket[idx].quantity <= 0) ticket.splice(idx, 1);
+      renderTicket();
+    }
+
+    async function confirmarVenta() {
+      if (ticket.length === 0) return;
+      const items = ticket.map(i => ({ product_id: i.product_id, quantity: i.quantity }));
+      const res = await fetch('/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(items)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Venta registrada: €${data.total.toFixed(2)}`);
+        ticket = [];
+        renderTicket();
+      } else {
+        const err = await res.json();
+        alert(err.detail || 'Error al registrar la venta');
+      }
+    }
+
+    async function cargarProductos() {
+      const res = await fetch('/api/products');
+      const products = await res.json();
+      document.getElementById('lista-productos').innerHTML = products.map(p => `
+        <div class="border rounded p-3 flex justify-between items-center">
+          <div>
+            <div class="font-medium">${p.name}</div>
+            <div class="text-xs text-gray-500">${p.barcode} · €${p.price.toFixed(2)}</div>
+          </div>
+          <div class="text-right">
+            <div class="font-bold">${p.stock}</div>
+            <div class="text-xs text-gray-400">en stock</div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('form-producto').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const params = new URLSearchParams({
+        name: document.getElementById('p-name').value,
+        barcode: document.getElementById('p-barcode').value,
+        price: document.getElementById('p-price').value,
+        stock: document.getElementById('p-stock').value || 0
+      });
+      const res = await fetch('/api/products?' + params, { method: 'POST' });
+      if (res.ok) {
+        document.getElementById('form-producto').reset();
+        cargarProductos();
+      } else {
+        alert('Error: código de barras duplicado o datos inválidos');
+      }
+    });
+
+    async function cargarVentas() {
+      const res = await fetch('/api/sales');
+      const sales = await res.json();
+      document.getElementById('lista-ventas').innerHTML = sales.map(s => `
+        <div class="border rounded p-3">
+          <div class="flex justify-between font-medium">
+            <span>Venta #${s.id}</span>
+            <span>€${s.total.toFixed(2)}</span>
+          </div>
+          <div class="text-xs text-gray-500 mb-1">${new Date(s.created_at).toLocaleString()}</div>
+          <div class="text-sm text-gray-600">
+            ${s.items.map(i => `${i.quantity}× ${i.name}`).join(', ')}
+          </div>
+        </div>
+      `).join('') || '<p class="text-gray-400 text-center">No hay ventas todavía</p>';
+    }
+
+    // Iniciar en vista venta
+    showView('venta');
+  </script>
+</body>
+</html>
